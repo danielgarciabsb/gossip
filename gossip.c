@@ -14,6 +14,7 @@
 #include <unistd.h>     /* para close() */
 #include <sys/socket.h> /* para socket(), bind(), e connect() */
 #include <arpa/inet.h>  /* para sockaddr_in e inet_ntoa() */
+#include <pthread.h>    /* para threads POSIX */
 
 void SairComErro(char *mensagem);  /* Sai do programa com erro */
 void LidarComCliente(int socketCliente);   /* TCP client handling function */
@@ -22,8 +23,15 @@ void IniciarCliente();
 void LidarComCliente(int socketServidor);
 void LidarComServidor(int socketCliente);
 char * LerEntrada(void);
+void *ThreadEscuta(void *threadArgs);
 
 #define TAMBUFFER 255 // Em bytes
+
+/* Struct da thread para armazenar o socket do cliente */
+struct ThreadArgs
+{
+    int clntSock;                      /* Armazena o socket ID do cliente */
+};
 
 int main(int argc, char *argv[])
 {
@@ -53,8 +61,10 @@ void IniciarServidor() {
     struct sockaddr_in ServSocketStruct; /* Endereco local */
     struct sockaddr_in echoClntAddr; /* Endereco cliente */
     unsigned short portaServidor;    /* Porta do servidor */
+    char * porta;                    /* Porta do servidor a ser lida no STDIN */
     unsigned int clntLen;            /* Tamanho da estrutura de dados do cliente */
-    char * porta;
+    pthread_t threadID;              /* Armazena o ID da thread */
+    struct ThreadArgs *threadArgs;   /* Armazena argumentos da thread */
 
     printf("Escolha uma porta para atribuir ao servidor [10101]: ");
     porta = LerEntrada();
@@ -88,13 +98,37 @@ void IniciarServidor() {
         clntLen = sizeof(echoClntAddr);
 
         /* Aguarda o cliente se conectar */
-        if ((clntSock = accept(servSock, (struct sockaddr *) &echoClntAddr, &clntLen)) < 0) // TODO: thread
+        if ((clntSock = accept(servSock, (struct sockaddr *) &echoClntAddr, &clntLen)) < 0)
             SairComErro("accept() falhou");
 
         printf("Cliente conectado %s\n", inet_ntoa(echoClntAddr.sin_addr));
 
-        LidarComCliente(clntSock);
+        /* Cria espaco na memoria para argumentos da thread */
+        if ((threadArgs = (struct ThreadArgs *) malloc(sizeof(struct ThreadArgs))) == NULL)
+            SairComErro("malloc() failed");
+        threadArgs -> clntSock = clntSock;
+
+        /* Cria a thread para receber mensagens do cliente */
+        if (pthread_create(&threadID, NULL, ThreadEscuta, (void *) threadArgs) != 0)
+            SairComErro("pthread_create() failed");
+        printf("with thread %ld\n", (long int) threadID);
     }
+}
+
+void *ThreadEscuta(void *threadArgs)
+{
+    int clntSock;                   /* Socket descriptor for client connection */
+
+    /* Guarantees that thread resources are deallocated upon return */
+    pthread_detach(pthread_self()); 
+
+    /* Extract socket file descriptor from argument */
+    clntSock = ((struct ThreadArgs *) threadArgs) -> clntSock;
+    free(threadArgs);              /* Deallocate memory for argument */
+
+    LidarComCliente(clntSock);
+
+    return (NULL);
 }
 
 void LidarComCliente(int socketServidor)
