@@ -8,6 +8,9 @@
     Dept. Ciencia da Computacao - UnB
 */
 
+// TODO: Limpar ingles
+// TODO: Signals?
+
 #include <stdio.h>      /* para printf() e fprintf() */
 #include <string.h>     /* para memset() */
 #include <stdlib.h>     /* para atoi() e exit() */
@@ -22,19 +25,47 @@ void IniciarServidor();
 void IniciarCliente();
 void LidarComCliente(int socketServidor);
 void LidarComServidor(int socketCliente);
-char * LerEntrada(void);
+char *LerEntrada(void);
+void *ThreadCliente(void *threadArgs);
 void *ThreadEscuta(void *threadArgs);
+void EscutaClientes(int servSock);
+void *ThreadEscutaServidor(void *threadArgs);
+void EscutaServidor(int clienteSock);
 
-#define TAMBUFFER 255 // Em bytes
+#define TAMBUFFER 100 // Em bytes
 
-/* Struct da thread para armazenar o socket do cliente */
+int indiceClientes;
+int listaClientes[100];
+
+void inserirCliente(int clienteSock) {
+
+    listaClientes[indiceClientes] = clienteSock;
+    indiceClientes ++;
+}
+
+void removerCliente(int clienteSock) {
+    int i;
+    for(i = 0; i < indiceClientes; i++) {
+        if(listaClientes[i] == clienteSock){
+            listaClientes[i] = listaClientes[indiceClientes - 1];
+            listaClientes[indiceClientes - 1] = 0;
+            indiceClientes --;
+        }
+    }
+}
+
+/* Struct da thread para armazenar o socket ID */
 struct ThreadArgs
 {
-    int clntSock;                      /* Armazena o socket ID do cliente */
+    int socket;                      /* Armazena o socket ID */
 };
+
 
 int main(int argc, char *argv[])
 {
+    memset(&listaClientes, 0, sizeof(listaClientes));
+    indiceClientes = 0;
+
     char * tipo;
 
     // Menu de opcoes
@@ -57,14 +88,17 @@ int main(int argc, char *argv[])
 void IniciarServidor() {
 
     int servSock;                    /* ID do socket do Servidor */
-    int clntSock;                    /* ID do socket do Cliente */
+    
     struct sockaddr_in ServSocketStruct; /* Endereco local */
-    struct sockaddr_in echoClntAddr; /* Endereco cliente */
+    
     unsigned short portaServidor;    /* Porta do servidor */
     char * porta;                    /* Porta do servidor a ser lida no STDIN */
-    unsigned int clntLen;            /* Tamanho da estrutura de dados do cliente */
+    
     pthread_t threadID;              /* Armazena o ID da thread */
     struct ThreadArgs *threadArgs;   /* Armazena argumentos da thread */
+
+    char * enviar;                  /* Mensagem a enviar para os clientes */
+    int i;
 
     printf("Escolha uma porta para atribuir ao servidor [10101]: ");
     porta = LerEntrada();
@@ -93,6 +127,61 @@ void IniciarServidor() {
     if (listen(servSock, 5) < 0)
         SairComErro("listen() falhou");
 
+    // ThreadEscuta
+
+    /* Cria espaco na memoria para argumentos da thread */
+    if ((threadArgs = (struct ThreadArgs *) malloc(sizeof(struct ThreadArgs))) == NULL)
+        SairComErro("malloc() falhou");
+    threadArgs -> socket = servSock;
+
+    /* Cria a thread para receber mensagens do cliente */
+    if (pthread_create(&threadID, NULL, ThreadEscuta, (void *) threadArgs) != 0)
+        SairComErro("pthread_create() falhou");
+
+    /* BROADCAST do servidor aos clientes */
+    do {
+
+        printf("Enviar aos clientes > ");
+        enviar = LerEntrada();
+        enviar[strlen(enviar) - 1] = '\0';
+
+        char clientesMsg[TAMBUFFER];
+        sprintf (clientesMsg, "Servidor: %s", enviar);
+
+        for(i = 0; i < indiceClientes; i++) {
+            if(send(listaClientes[i], clientesMsg, strlen(clientesMsg), 0) != strlen(clientesMsg))
+                SairComErro("send() falhou");
+        }
+    } while (strcmp("BYE CLT", enviar));
+}
+
+/*
+    Thread desacoplada para lidar com clientes
+*/
+
+void *ThreadEscuta(void *threadArgs)
+{
+    int servSock;
+
+    /* Limpa os recursos da thread ao sair */
+    pthread_detach(pthread_self());
+
+    servSock = ((struct ThreadArgs *) threadArgs) -> socket;
+    free(threadArgs);
+
+    EscutaClientes(servSock);
+
+    return (NULL);
+}
+
+void EscutaClientes(int servSock) {
+
+    unsigned int clntLen;            /* Tamanho da estrutura de dados do cliente */
+    struct sockaddr_in echoClntAddr; /* Endereco cliente */
+    int clntSock;                    /* ID do socket do Cliente */
+    pthread_t threadID;              /* Armazena o ID da thread */
+    struct ThreadArgs *threadArgs;   /* Armazena argumentos da thread */
+
     while(1)
     {
         clntLen = sizeof(echoClntAddr);
@@ -101,30 +190,31 @@ void IniciarServidor() {
         if ((clntSock = accept(servSock, (struct sockaddr *) &echoClntAddr, &clntLen)) < 0)
             SairComErro("accept() falhou");
 
-        printf("Cliente conectado %s\n", inet_ntoa(echoClntAddr.sin_addr));
+        inserirCliente(clntSock);
+
+        printf("\nCliente conectado %s\n", inet_ntoa(echoClntAddr.sin_addr));
+        printf("Enviar aos clientes > ");
 
         /* Cria espaco na memoria para argumentos da thread */
         if ((threadArgs = (struct ThreadArgs *) malloc(sizeof(struct ThreadArgs))) == NULL)
-            SairComErro("malloc() failed");
-        threadArgs -> clntSock = clntSock;
+            SairComErro("malloc() falhou");
+        threadArgs -> socket = clntSock;
 
         /* Cria a thread para receber mensagens do cliente */
-        if (pthread_create(&threadID, NULL, ThreadEscuta, (void *) threadArgs) != 0)
-            SairComErro("pthread_create() failed");
-        printf("with thread %ld\n", (long int) threadID);
+        if (pthread_create(&threadID, NULL, ThreadCliente, (void *) threadArgs) != 0)
+            SairComErro("pthread_create() falhou");
     }
 }
 
-void *ThreadEscuta(void *threadArgs)
+void *ThreadCliente(void *threadArgs)
 {
-    int clntSock;                   /* Socket descriptor for client connection */
+    int clntSock;
 
-    /* Guarantees that thread resources are deallocated upon return */
+    /* Limpa os recursos da thread ao sair */
     pthread_detach(pthread_self()); 
 
-    /* Extract socket file descriptor from argument */
-    clntSock = ((struct ThreadArgs *) threadArgs) -> clntSock;
-    free(threadArgs);              /* Deallocate memory for argument */
+    clntSock = ((struct ThreadArgs *) threadArgs) -> socket;
+    free(threadArgs);
 
     LidarComCliente(clntSock);
 
@@ -135,6 +225,7 @@ void LidarComCliente(int socketServidor)
 {
     char bufferMensagem[TAMBUFFER];     /* Buffer da mensagem */
     int tamMensagem;                    /* Tamanho da mensagem recebida */
+    int i;
 
     /* Aguarda receber mensagem do cliente "HELLO SVR" */
     if ((tamMensagem = recv(socketServidor, bufferMensagem, TAMBUFFER, 0)) < 0)
@@ -150,8 +241,20 @@ void LidarComCliente(int socketServidor)
 
     /* Funcao de chat enquanto nao receber "BYE SRV" */
     do {
+        
+        fflush(stdout);
+        printf("\rCliente %d enviou: %s\n", socketServidor, bufferMensagem);
+        printf("Enviar aos clientes > ");
+        fflush(stdout);
 
-        printf("Cliente [ %d ] > %s\n", socketServidor, bufferMensagem);
+        char clientesMsg[TAMBUFFER];
+        sprintf (clientesMsg, "Cliente %d: %s", socketServidor, bufferMensagem);
+
+        for(i = 0; i < indiceClientes; i++) {
+            if(listaClientes[i] == socketServidor) continue; // Nao envia de volta ao cliente
+            if(send(listaClientes[i], clientesMsg, strlen(clientesMsg), 0) != strlen(clientesMsg))
+                SairComErro("send() falhou");
+        }
         memset(&bufferMensagem, 0, TAMBUFFER); // Limpa a memoria
 
         /* Recebe mais mensagens do cliente */
@@ -160,7 +263,7 @@ void LidarComCliente(int socketServidor)
 
     } while (strcmp("BYE SRV", bufferMensagem));
 
-    printf("Cliente [ %d ] > %s\n", socketServidor, bufferMensagem);
+    printf("\nCliente [ %d ]: %s\n", socketServidor, bufferMensagem);
     printf("Enviando \"BYE CLT\" e desconectando cliente [ %d ] ...\n", socketServidor);
     
     /* Envia ao cliente "BYE CLT" */
@@ -170,9 +273,11 @@ void LidarComCliente(int socketServidor)
     if (send(socketServidor, bye, tamanhoMsg, 0) != tamanhoMsg)
             SairComErro("send() falhou");
 
+    removerCliente(socketServidor);
     close(socketServidor);    /* Fecha a conexao com o cliente */
 
     printf("Cliente [ %d ] desconectado!\n\n", socketServidor);
+    printf("Enviar aos clientes > ");
 }
 
 void IniciarCliente() {
@@ -182,6 +287,8 @@ void IniciarCliente() {
     unsigned short portaServidor;        /* Porta do servidor */
     char * IPserv;                       /* IP do servidor */
     char * porta;                        /* Porta do servidor char */
+    pthread_t threadID;              /* Armazena o ID da thread */
+    struct ThreadArgs *threadArgs;   /* Armazena argumentos da thread */
 
     printf("Digite o endereco IP do servidor [127.0.0.1]: ");
     IPserv = LerEntrada();
@@ -210,13 +317,63 @@ void IniciarCliente() {
     if (connect(clienteSock, (struct sockaddr *) &ServSocketStruct, sizeof(ServSocketStruct)) < 0)
         SairComErro("connect() falhou");
 
+    // ThreadEscuta
+
+    /* Cria espaco na memoria para argumentos da thread */
+    if ((threadArgs = (struct ThreadArgs *) malloc(sizeof(struct ThreadArgs))) == NULL)
+        SairComErro("malloc() falhou");
+    threadArgs -> socket = clienteSock;
+
+    /* Cria a thread para receber mensagens do cliente */
+    if (pthread_create(&threadID, NULL, ThreadEscutaServidor, (void *) threadArgs) != 0)
+        SairComErro("pthread_create() falhou");
+
     LidarComServidor(clienteSock);
 }
+
+void *ThreadEscutaServidor(void *threadArgs)
+{
+    int clienteSock;
+
+    /* Limpa os recursos da thread ao sair */
+    pthread_detach(pthread_self());
+
+    clienteSock = ((struct ThreadArgs *) threadArgs) -> socket;
+    free(threadArgs);
+
+    EscutaServidor(clienteSock);
+
+    return (NULL);
+}
+
+void EscutaServidor(int clienteSock) {
+
+    char bufferMensagem[TAMBUFFER];     /* Buffer da mensagem */
+
+    /* Funcao de chat enquanto nao receber "BYE SRV" */
+    do {
+
+        memset(&bufferMensagem, 0, TAMBUFFER); // Limpa a memoria
+
+        /* Recebe mais mensagens do cliente */
+        if (recv(clienteSock, bufferMensagem, TAMBUFFER, 0) < 0)
+            SairComErro("recv() falhou");
+
+        fflush(stdout);
+        printf("\r%s\n", bufferMensagem);
+        printf("Enviar > ");
+        fflush(stdout);
+
+    } while (strcmp("BYE CLT", bufferMensagem));
+
+    close(clienteSock);
+    exit(1);
+}
+
 
 void LidarComServidor(int socketCliente) {
 
     char bufferMensagem[TAMBUFFER];     /* Buffer da mensagem */
-    int tamMensagem;                    /* Tamanho da mensagem recebida */
     char * enviar;
 
     /* Envia "HELLO SVR" no inicio */
@@ -229,15 +386,15 @@ void LidarComServidor(int socketCliente) {
     memset(&bufferMensagem, 0, TAMBUFFER); // Limpa a memoria
 
     /* Aguarda mensagem de resposta do servidor "HELLO CLT" */
-    if ((tamMensagem = recv(socketCliente, bufferMensagem, TAMBUFFER, 0)) < 0)
+    if (recv(socketCliente, bufferMensagem, TAMBUFFER, 0) < 0)
         SairComErro("recv() falhou");
 
-    printf("Servidor [ %d ] > %s\n", socketCliente, bufferMensagem);
+    printf("Servidor: %s\n", bufferMensagem);
 
     /* Funcao de chat enquanto nao enviar "BYE SRV" */
     do {
 
-        printf("Enviar ao servidor [ %d ] > ", socketCliente);
+        printf("Enviar > ");
         enviar = LerEntrada();
         enviar[strlen(enviar) - 1] = '\0';
 
@@ -253,11 +410,11 @@ void LidarComServidor(int socketCliente) {
     if (recv(socketCliente, bufferMensagem, TAMBUFFER, 0) < 0)
         SairComErro("recv() falhou");
 
-    printf("Servidor [ %d ] > %s\n", socketCliente, bufferMensagem);
+    printf("Servidor: %s\n", bufferMensagem);
 
     close(socketCliente);
 
-    printf("Servidor [ %d ] desconectado!\n", socketCliente);
+    printf("Servidor desconectado!\n");
 
 }
 
